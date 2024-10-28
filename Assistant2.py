@@ -2,6 +2,8 @@ from openai import OpenAI
 from openai import AssistantEventHandler
 from openai.types.beta import Assistant, AssistantDeleted
 from openai.types.beta import Thread, ThreadDeleted
+from openai.types.beta import VectorStore, VectorStoreDeleted
+from openai.types.beta.vector_stores import VectorStoreFile
 from openai.types.beta.threads import Message
 
 from enum import Enum
@@ -12,8 +14,10 @@ class LanguageModel(Enum):
     GPT_4O_MINI: str = "gpt-4o-mini"
 
 class Stream_Handler(AssistantEventHandler):
-    def __init__(self, assistantName: str):
+    def __init__(self, client: OpenAI, assistantName: str | None = 'Assistant'):
         super().__init__()
+
+        self.client = client
         self.assistantName = assistantName
 
     @override
@@ -23,6 +27,161 @@ class Stream_Handler(AssistantEventHandler):
     @override
     def on_text_delta(self, delta, snapshot):
         print(delta.value, end="", flush=True)
+
+    @override
+    def on_text_done(self, text):
+        return super().on_text_done(text)
+    
+    @override
+    def on_tool_call_created(self, tool_call):
+        print(f"\n{self.assistantName} > {tool_call.type}", flush=True)
+
+    @override
+    def on_message_done(self, message):
+        # Get message annotations
+        content = message.content[0].text
+        annotations: list = content.annotations
+
+        # Build citations
+        citations: list = []
+        for index, annotation in enumerate(annotations):
+            content.value = content.value.replace(
+                annotation.text, f"[{index}]"
+            )
+
+            if file_citation := getattr(annotation, "file_citation", None):
+                citedFile = self.client.files.retrieve(file_citation.file_id)
+                citations.append(f"[{citedFile.filename}]")
+
+        print(f"\n{''.join(citations)}", end="\n", flush=True)
+
+class Vector_Store:
+    def __init__(
+        self, 
+        client: OpenAI, 
+        id: str | None = None, 
+        name: str | None = 'Vector_Store', 
+        lifeTime: int | None = 1
+    ):
+        # User defined attributes
+        self.client = client
+        self.id = id
+        self.name = name
+        self.lifeTime = lifeTime
+
+        # Default attributes
+        self.files: dict[str, str] = {}
+
+        # Retrieve the vector store
+        self.instance = self.Retrieve_Vector_Store()
+        self.id = self.instance.id
+
+    # # # #
+    # 
+    # Vector Store Creation and Deletion Methods
+    #
+    # # # #
+
+    def Retrieve_Vector_Store(self) -> VectorStore:
+        # Variable Initilization
+        instance: VectorStore = None
+
+        # Create a new vector store if an ID was not provided
+        if self.id is None:
+            return self.Create_Vector_Store()
+
+        # Retrieve the vector store
+        return self.client.beta.vector_stores.retrieve(vector_store_id=self.id)
+    
+    def Create_Vector_Store(self) -> VectorStore:
+
+        # Create the vector store
+        return self.client.beta.vector_stores.create(
+            name=self.name,
+            expires_after={
+                "anchor": "last_active_at",
+                "days": self.lifeTime
+            }
+        )
+
+    def Delete_Vector_Store(self, deleteFiles: bool = True) -> bool:
+
+        # Delete attached files
+        if deleteFiles:
+            if not self.Delete_All_Files():
+                print("Failed to delete attached files")
+
+        # Delete the vector store
+        deletionResponse: VectorStoreDeleted = self.client.beta.vector_stores.delete(
+            vector_store_id=self.id
+        )
+
+        # Check if the vector store was deleted
+        if deletionResponse.deleted:
+            self.instance = None
+            self.id = None
+            return True
+        else:
+            return False
+        
+    # # # #
+    # 
+    # File Management Methods
+    #
+    # # # #
+
+    def Add_Existing_File(self, fileName: str, fileID: str) -> None:
+        raise NotImplementedError
+
+    def Add_New_File(self, fileName: str, filePath: str) -> None:
+        # Open the file into a file stream
+        fileStream = open(filePath, "rb")
+
+        # Upload and poll the file
+        vsFile: VectorStoreFile = self.client.beta.vector_stores.files.upload_and_poll(
+            vector_store_id=self.id,
+            file=fileStream
+        )
+
+        # Add the file to the files dictionary
+        self.files[fileName] = vsFile.id
+
+    def Delete_File(self, fileName: str) -> None:
+        if self.files == {}:
+            return None
+
+        try:
+            fileID = self.files[fileName]
+
+            # Delete the file
+            self.client.beta.vector_stores.files.delete(
+                file_id=fileID,
+                vector_store_id=self.id
+            )
+
+            # Remove the file from the files dictionary
+            del self.files[fileName]
+
+        except KeyError:
+            raise ValueError("File not found")
+        
+    def Delete_All_Files(self) -> bool:
+        # Get file names
+        fileNames: list[str] = list(self.files.keys())
+
+        # Check if there are any files
+        if len(fileNames) == 0:
+            return True
+
+        # Delete all files
+        for fileName in fileNames:
+            self.Delete_File(fileName)
+
+        # Check status
+        if self.files == {}:
+            return True
+        else:
+            return False
 
 class Assistant_V2:
     def __init__(
@@ -35,14 +194,17 @@ class Assistant_V2:
     ):
         # Set user defined attributes
         self.client = client
-        self.ID = id
+        self.id = id
         self.name = name
         self.instructionPrompt = instructionPrompt
         self.languageModel = languageModel
 
         # Set default attributes
         self.threads: dict[str, str] = {}
-        self.streamHandler: Stream_Handler = Stream_Handler(self.name)
+        self.tools: list[dict[str, any]] = [
+            {"type": "file_search"}
+        ]
+        self.vectorStores: list[Vector_Store] = []
 
         # Retrieve the assistant
         self.instance: Assistant = self.Retrieve_Assistant()
@@ -67,17 +229,17 @@ class Assistant_V2:
     def Retrieve_Assistant(self) -> Assistant:
         
         # Create a new assistant if an ID was not provided
-        if self.ID is None:
+        if self.id is None:
             self.Create_Assistant()
 
         # Retrieve the assistant
         return self.client.beta.assistants.retrieve(
-            assistant_id=self.ID
+            assistant_id=self.id
         )
 
     def Create_Assistant(self) -> None:
 
-        if self.ID is not None:
+        if self.id is not None:
             # Delete the pre-existing assistant
             self.Delete_Assistant()
 
@@ -85,12 +247,13 @@ class Assistant_V2:
         self.instance = self.client.beta.assistants.create(
             name=self.name,
             instructions=self.instructionPrompt,
-            model=self.languageModel.value
+            model=self.languageModel.value,
+            tools=self.tools
         )
 
         # Set the assistant ID
         try:
-            self.ID = self.instance.id
+            self.id = self.instance.id
 
         # Raise an exception if the assistant could not be created
         except Exception("Failed to create assistant") as e:
@@ -105,7 +268,7 @@ class Assistant_V2:
         
         # Delete the assistant
         deletionResponse: AssistantDeleted = self.client.beta.assistants.delete(
-            assistant_id=self.ID
+            assistant_id=self.id
         )
 
         # Check if the assistant was successfully deleted
@@ -113,7 +276,7 @@ class Assistant_V2:
 
             # Set the assistant instance to None
             self.instance = None
-            self.ID = None
+            self.id = None
 
             # Delete the threads associated with the assistant
             self.threads.clear()
@@ -133,7 +296,7 @@ class Assistant_V2:
         try:
             # Update the assistant
             self.instance = self.client.beta.assistants.update(
-                assistant_id=self.ID,
+                assistant_id=self.id,
                 name=name
             )
             
@@ -150,7 +313,7 @@ class Assistant_V2:
         try:
             # Update the assistant
             self.instance = self.client.beta.assistants.update(
-                assistant_id=self.ID,
+                assistant_id=self.id,
                 instructions=instructionPrompt
             )
             
@@ -167,7 +330,7 @@ class Assistant_V2:
         try:
             # Update the assistant
             self.instance = self.client.beta.assistants.update(
-                assistant_id=self.ID,
+                assistant_id=self.id,
                 model=languageModel.value
             )
             
@@ -250,8 +413,22 @@ class Assistant_V2:
             print(f"Failed to update thread name: {e}")
             return False
 
-    def Update_Thread_Tools(self, threadName: str, newThreadTools: list) -> bool:
-        raise NotImplementedError
+    def Link_Vector_Store(self, threadName: str, vectorStore: Vector_Store) -> bool:
+        # Variable Initilizaiton
+        threadID: str = self.threads[threadName]
+        vectorStoreID: str = vectorStore.id
+
+        # Link the vector store
+        try:
+            self.client.beta.threads.update(
+                thread_id=threadID,
+                tool_resources={"file_search":{
+                    "vector_store_ids":[vectorStoreID]
+                }}
+            )
+        except Exception as e:
+            print(f"Error occurred while linkning vector store: {e}")
+            raise e
 
     # # # #
     # 
@@ -319,7 +496,7 @@ class Assistant_V2:
         # Create a run
         run = self.client.beta.threads.runs.create_and_poll(
             thread_id=self.threads[threadName],
-            assistant_id=self.ID            
+            assistant_id=self.id            
         )
 
         if run.status == 'completed':
@@ -340,7 +517,12 @@ class Assistant_V2:
 
         else: raise Exception("Run did not complete successfully")
     
-    def Stream_Response(self, threadName: str) -> None:
+    def Stream_Response(self, threadName: str, streamHandler: Stream_Handler = None) -> None:
+        if streamHandler is None:
+            streamHandler = Stream_Handler(
+                client=self.client,
+                assistantName=self.name
+            )
 
         # Verify that the thread exists
         self._Verify_Thread_Name(threadName)
@@ -348,7 +530,7 @@ class Assistant_V2:
         # Create a stream
         with self.client.beta.threads.runs.stream(
             thread_id=self.threads[threadName],
-            assistant_id=self.ID,
-            event_handler=self.streamHandler
+            assistant_id=self.id,
+            event_handler=streamHandler
         ) as stream:
             stream.until_done()
