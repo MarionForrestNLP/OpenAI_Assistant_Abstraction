@@ -3,22 +3,59 @@ from openai import AssistantEventHandler
 from openai.types.beta import Assistant, AssistantDeleted
 from openai.types.beta import Thread, ThreadDeleted
 from openai.types.beta import VectorStore, VectorStoreDeleted
-from openai.types.beta.vector_stores import VectorStoreFile
+from openai.types.beta.vector_stores import VectorStoreFile, VectorStoreFileDeleted
 from openai.types.beta.threads import Message
 
 from enum import Enum
 from typing_extensions import override
+from os import path
 
-class LanguageModel(Enum):
+class Thread_Error(Exception):
+    """
+    Exception class for thread errors.
+    """
+
+    def __init__(self, message: str, code: int = 0):
+        self.message = message
+        self.code = code
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"(Code: {self.code}) {self.message}"
+    
+    def Lookup_Error(self, code: int) -> str:
+        """
+        Lookup error message based on code.
+        
+        Parameters:
+        ---
+            code (int): The error code.
+        
+        Returns:
+        ---
+            str: The full description of the error message.
+        """
+        raise NotImplementedError # Ironic
+
+class Language_Model(Enum):
+    """
+    Enum class for language models.
+    """
+
     GPT_3_5_TURBO: str  = "gpt-3.5-turbo-0125"
     GPT_4O_MINI: str = "gpt-4o-mini"
 
 class Stream_Handler(AssistantEventHandler):
-    def __init__(self, client: OpenAI, assistantName: str | None = 'Assistant'):
+    def __init__(self, client: OpenAI, assistantName: str = 'Assistant'):
         super().__init__()
 
         self.client = client
         self.assistantName = assistantName
+
+    @override
+    def on_exception(self, exception):
+        print(f"Error occurred while streaming: {exception}")
+        return super().on_exception(exception)
 
     @override
     def on_text_created(self, text):
@@ -34,10 +71,11 @@ class Stream_Handler(AssistantEventHandler):
     
     @override
     def on_tool_call_created(self, tool_call):
-        print(f"\n{self.assistantName} > {tool_call.type}", flush=True)
+        print(f"\n{self.assistantName} > Using the {tool_call.type.replace('_', ' ')} tool.", flush=True)
 
     @override
     def on_message_done(self, message):
+
         # Get message annotations
         content = message.content[0].text
         annotations: list = content.annotations
@@ -51,9 +89,13 @@ class Stream_Handler(AssistantEventHandler):
 
             if file_citation := getattr(annotation, "file_citation", None):
                 citedFile = self.client.files.retrieve(file_citation.file_id)
-                citations.append(f"[{citedFile.filename}]")
+                citations.append(f"{citedFile.filename}")
 
-        print(f"\n{''.join(citations)}", end="\n", flush=True)
+        if (len(citations) > 0):
+            print(f"\nSources: ", end="", flush=True)
+            for i, x in enumerate(citations):
+                print(f"[{i}] {x}, ", end="", flush=True)
+            print("", end="\n", flush=True)
 
 class Vector_Store:
     def __init__(
@@ -83,9 +125,6 @@ class Vector_Store:
     # # # #
 
     def Retrieve_Vector_Store(self) -> VectorStore:
-        # Variable Initilization
-        instance: VectorStore = None
-
         # Create a new vector store if an ID was not provided
         if self.id is None:
             return self.Create_Vector_Store()
@@ -133,7 +172,10 @@ class Vector_Store:
     def Add_Existing_File(self, fileName: str, fileID: str) -> None:
         raise NotImplementedError
 
-    def Add_New_File(self, fileName: str, filePath: str) -> None:
+    def Add_File_By_Path(self, fileName: str, filePath: str) -> None:
+        if path.exists(filePath) == False:
+            raise ValueError("File not found")
+
         # Open the file into a file stream
         fileStream = open(filePath, "rb")
 
@@ -154,13 +196,16 @@ class Vector_Store:
             fileID = self.files[fileName]
 
             # Delete the file
-            self.client.beta.vector_stores.files.delete(
+            deletionResponse: VectorStoreFileDeleted = self.client.beta.vector_stores.files.delete(
                 file_id=fileID,
                 vector_store_id=self.id
             )
 
             # Remove the file from the files dictionary
-            del self.files[fileName]
+            if deletionResponse.deleted:
+                del self.files[fileName]
+            else: 
+                print(f"Failed to delete {fileName}.")
 
         except KeyError:
             raise ValueError("File not found")
@@ -190,7 +235,7 @@ class Assistant_V2:
         id: str | None = None,
         name: str | None = 'Assistant',
         instructionPrompt: str | None = 'You are a simple chat bot.',
-        languageModel: LanguageModel | None = LanguageModel.GPT_3_5_TURBO,
+        languageModel: Language_Model | None = Language_Model.GPT_3_5_TURBO,
     ):
         # Set user defined attributes
         self.client = client
@@ -325,7 +370,7 @@ class Assistant_V2:
             print(f"Failed to update assistant instruction prompt: {e}")
             return False
         
-    def Update_Assistant_Language_Model(self, languageModel: LanguageModel) -> bool:
+    def Update_Assistant_Language_Model(self, languageModel: Language_Model) -> bool:
 
         try:
             # Update the assistant
@@ -348,21 +393,32 @@ class Assistant_V2:
     #
     # # # # 
 
-    def Create_Thread(self, threadName: str) -> None:
+    def Create_Thread(self, threadName: str) -> str:
         # Verify that the thread name is unique
         if threadName in self.threads:
-            raise ValueError("Thread name already exists")
+            raise Thread_Error(
+                message=f"Thread name '{threadName}' already exists.",
+                code=100
+            )
+        
+        # Variable initialization
+        threadInstance: Thread = None
 
-        try:
-            # Create a new thread
-            newThread: Thread = self.client.beta.threads.create()
+        # Create a new thread
+        threadInstance = self.client.beta.threads.create()
 
-            # Add the new thread to the threads dictionary
-            self.threads[threadName] = newThread.id
+        # Exception handling
+        if threadInstance is None:
+            raise Thread_Error(
+                message="Failed to create thread.",
+                code=101
+            )
 
-        except Exception as e:
-            print(f"Failed to create thread: {e}")
-            raise e
+        # Add the thread to the threads dictionary
+        self.threads[threadName] = threadInstance.id
+
+        # Return the thread ID
+        return threadInstance.id
         
     def Delete_Thread(self, threadName: str) -> bool:
         self._Verify_Thread_Name(threadName)
@@ -393,8 +449,10 @@ class Assistant_V2:
             )
 
         except Exception as e:
-            print(f"Failed to retrieve thread: {e}")
-            raise e
+            raise Thread_Error(
+                message=f"Failed to retrieve thread. | {e}",
+                code=102
+            )
         
     def Update_Thread_Name(self, threadName: str, newThreadName: str) -> bool:
         self._Verify_Thread_Name(threadName)
