@@ -1,5 +1,5 @@
 # Import the Assistant Class and relevant libraries
-import Modules.Assistant as Assistant # or you can use: from Assistant import Assistant
+import Assistant as Assistant # or you can use: from Assistant import Assistant
 import json
 
 from openai import OpenAI

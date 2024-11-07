@@ -53,6 +53,34 @@ class Stream_Handler(AssistantEventHandler):
             message=f"Stream failed to complete. {exception}",
             code=303
         )
+    
+    @override
+    def on_event(self, event):
+        """
+        **[ DO NOT OVERRIDE ]**
+        """
+        if event.event == 'thread.run.requires_action':
+            self.Handle_Required_Actions(data=event.data)
+
+    def Handle_Required_Actions(self, data: Run) -> None:
+        return None
+
+    def _Submit_Tool_Outputs(self, toolOutputs: list[dict]) -> None:
+        """
+        **[ DO NOT OVERRIDE ]**
+        """
+        with self.client.beta.threads.runs.submit_tool_outputs_stream(
+            thread_id=self.current_run.thread_id,
+            run_id=self.current_run.id,
+            tool_outputs=toolOutputs,
+            event_handler=Stream_Handler(
+                client=self.client,
+                assistantName=self.assistantName
+            )
+        ) as stream:
+            for text in stream.text_deltas:
+                print(text, end="", flush=True)
+            print()
 
     @override
     def on_text_created(self, text) -> None:
@@ -602,6 +630,28 @@ class Assistant_V2:
             raise Assistant_Error(
                 message=f"Failed to update assistant: {e}",
                 code=202
+            )
+        
+    def Update_Assistant_Tools(self, tools: list[dict[str, any]]) -> bool:
+
+        # Maintain the file search tool
+        tools.append({"type": "file_search"})
+
+        try:
+            # Update the assistant
+            self.instance = self.client.beta.assistants.update(
+                assistant_id=self.id,
+                tools=tools
+            )
+            
+            # Reset the assistant tools
+            self.tools = tools
+            return True
+
+        except Exception as e:
+            raise Assistant_Error(
+                message=f"Failed to update assistant: {e}",
+                code=206
             )
 
     # # # #

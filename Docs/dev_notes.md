@@ -78,6 +78,11 @@
         "message": "Failed to retrieve assistant.",
         "details": "The OpenAI client failed to retrieve the assistant with the provided id. Verify your OpenAI client and/or assistant id and try again."
     }
+
+    206: {
+        "message": "Failed to update assistant.",
+        "details": "The OpenAI client failed to update the assistant's tools. Verify your OpenAI client and/or the tool data and try again."
+    }
 }
 ```
 
